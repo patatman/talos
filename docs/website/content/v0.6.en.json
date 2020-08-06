@@ -85,6 +85,16 @@
             "path": "v0.6/en/guides/metal/matchbox"
           }
         ]
+      },
+      {
+        "title": "Advanced",
+        "path": "v0.6/en/guides/advanced",
+        "children": [
+          {
+            "title": "Multi controlplane",
+            "path": "v0.6/en/guides/advanced/upgrade"
+          }
+        ]
       }
     ]
   },
