@@ -85,6 +85,16 @@
             "path": "v0.6/en/guides/metal/matchbox"
           }
         ]
+      },
+      {
+        "title": "Upgrades",
+        "path": "v0.6/en/guides/upgrades",
+        "children": [
+          {
+            "title": "Talos",
+            "path": "v0.6/en/guides/upgrades/talos"
+          }
+        ]
       }
     ]
   },
