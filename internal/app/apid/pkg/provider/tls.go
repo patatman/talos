@@ -11,10 +11,13 @@ import (
 	stdlibtls "crypto/tls"
 	stdlibnet "net"
 
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/constants"
-	"github.com/talos-systems/talos/pkg/grpc/tls"
-	"github.com/talos-systems/talos/pkg/net"
+	"github.com/talos-systems/net"
+
+	"github.com/talos-systems/crypto/tls"
+
+	"github.com/talos-systems/talos/pkg/grpc/gen"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // TLSConfig provides client & server TLS configs for apid.
@@ -42,12 +45,19 @@ func NewTLSConfig(config config.Provider, endpoints []string) (*TLSConfig, error
 		}
 	}
 
-	tlsConfig := &TLSConfig{}
-
-	tlsConfig.certificateProvider, err = tls.NewRemoteRenewingFileCertificateProvider(
+	generator, err := gen.NewRemoteGenerator(
 		config.Machine().Security().Token(),
 		endpoints,
 		constants.TrustdPort,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create remote certificate genertor: %w", err)
+	}
+
+	tlsConfig := &TLSConfig{}
+
+	tlsConfig.certificateProvider, err = tls.NewRenewingCertificateProvider(
+		generator,
 		dnsNames,
 		ips,
 	)

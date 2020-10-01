@@ -16,8 +16,9 @@ import (
 	"github.com/jsimonetti/rtnetlink"
 	"golang.org/x/sys/unix"
 
-	"github.com/talos-systems/talos/pkg/config"
-	talosnet "github.com/talos-systems/talos/pkg/net"
+	talosnet "github.com/talos-systems/net"
+
+	"github.com/talos-systems/talos/pkg/machinery/config"
 )
 
 // filterInterfaces filters network links by name so we only mange links

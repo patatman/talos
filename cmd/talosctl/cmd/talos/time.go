@@ -16,9 +16,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/peer"
 
-	timeapi "github.com/talos-systems/talos/api/time"
 	"github.com/talos-systems/talos/pkg/cli"
-	"github.com/talos-systems/talos/pkg/client"
+	timeapi "github.com/talos-systems/talos/pkg/machinery/api/time"
+	"github.com/talos-systems/talos/pkg/machinery/client"
 )
 
 // timeCmd represents the time command.
@@ -54,7 +54,7 @@ var timeCmd = &cobra.Command{
 			}
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "NODE\tNTP-SERVER\tLOCAL-TIME\tREMOTE-TIME")
+			fmt.Fprintln(w, "NODE\tNTP-SERVER\tNODE-TIME\tNTP-SERVER-TIME")
 
 			defaultNode := client.AddrFromPeer(&remotePeer)
 

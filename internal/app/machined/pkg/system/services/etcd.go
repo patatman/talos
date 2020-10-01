@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -23,24 +24,26 @@ import (
 	"github.com/containerd/containerd/oci"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/etcdserver/api/v3rpc/rpctypes"
+
+	"github.com/talos-systems/crypto/x509"
+	"github.com/talos-systems/go-retry/retry"
+	"github.com/talos-systems/net"
 
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime"
-	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader/syslinux"
+	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/platform"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/events"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/health"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner/containerd"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner/restart"
-	"github.com/talos-systems/talos/internal/pkg/conditions"
 	"github.com/talos-systems/talos/internal/pkg/containers/image"
 	"github.com/talos-systems/talos/internal/pkg/etcd"
 	"github.com/talos-systems/talos/pkg/argsbuilder"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
-	"github.com/talos-systems/talos/pkg/crypto/x509"
-	"github.com/talos-systems/talos/pkg/net"
-	"github.com/talos-systems/talos/pkg/retry"
+	"github.com/talos-systems/talos/pkg/conditions"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // Etcd implements the Service interface. It serves as the concrete type with
@@ -82,7 +85,7 @@ func (e *Etcd) Condition(r runtime.Runtime) conditions.Condition {
 
 // DependsOn implements the Service interface.
 func (e *Etcd) DependsOn(r runtime.Runtime) []string {
-	if r.State().Platform().Mode() == runtime.ModeContainer {
+	if r.State().Platform().Mode() == runtime.ModeContainer || !r.Config().Machine().Time().Enabled() {
 		return []string{"containerd", "networkd"}
 	}
 
@@ -105,6 +108,10 @@ func (e *Etcd) Runner(r runtime.Runtime) (runner.Runner, error) {
 	env := []string{}
 	for key, val := range r.Config().Machine().Env() {
 		env = append(env, fmt.Sprintf("%s=%s", key, val))
+	}
+
+	if goruntime.GOARCH == "arm64" {
+		env = append(env, "ETCD_UNSUPPORTED_ARCH=arm64")
 	}
 
 	return restart.New(containerd.NewRunner(
@@ -132,13 +139,32 @@ func (e *Etcd) HealthFunc(runtime.Runtime) health.Check {
 			return err
 		}
 
+		defer client.Close() //nolint: errcheck
+
+		// Get a random key. As long as we can get the response without an error, the
+		// endpoint is healthy.
+
+		_, err = client.Get(ctx, "health")
+		if err == rpctypes.ErrPermissionDenied {
+			// Permission denied is OK since proposal goes through consensus to get this error.
+			err = nil
+		}
+
+		if err != nil {
+			return err
+		}
+
 		return client.Close()
 	}
 }
 
 // HealthSettings implements the HealthcheckedService interface.
 func (e *Etcd) HealthSettings(runtime.Runtime) *health.Settings {
-	return &health.DefaultSettings
+	return &health.Settings{
+		InitialDelay: 5 * time.Second,
+		Period:       20 * time.Second,
+		Timeout:      15 * time.Second,
+	}
 }
 
 // nolint: gocyclo
@@ -342,22 +368,15 @@ func (e *Etcd) argsForInit(ctx context.Context, r runtime.Runtime) error {
 	var upgraded bool
 
 	if p.Mode() != runtime.ModeContainer {
-		var f *os.File
+		var meta *bootloader.Meta
 
-		if f, err = os.Open(syslinux.SyslinuxLdlinux); err != nil {
+		if meta, err = bootloader.NewMeta(); err != nil {
 			return err
 		}
-
 		// nolint: errcheck
-		defer f.Close()
+		defer meta.Close()
 
-		var adv syslinux.ADV
-
-		if adv, err = syslinux.NewADV(f); err != nil {
-			return err
-		}
-
-		_, upgraded = adv.ReadTag(syslinux.AdvUpgrade)
+		_, upgraded = meta.ReadTag(bootloader.AdvUpgrade)
 	}
 
 	primaryAddr, listenAddress, err := primaryAndListenAddresses()
@@ -431,11 +450,17 @@ func (e *Etcd) argsForInit(ctx context.Context, r runtime.Runtime) error {
 	return nil
 }
 
+//nolint: gocyclo
 func (e *Etcd) setup(ctx context.Context, r runtime.Runtime, errCh chan error) {
 	errCh <- func() error {
 		var err error
 
-		if err = os.MkdirAll(constants.EtcdDataPath, 0o755); err != nil {
+		if err = os.MkdirAll(constants.EtcdDataPath, 0o700); err != nil {
+			return err
+		}
+
+		// Data path might exist after upgrade from previous version of Talos.
+		if err = os.Chmod(constants.EtcdDataPath, 0o700); err != nil {
 			return err
 		}
 

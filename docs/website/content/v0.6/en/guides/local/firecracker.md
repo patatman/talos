@@ -88,19 +88,19 @@ sudo cp tc-redirect-tap /opt/cni/bin
 
 ## Install Talos kernel and initramfs
 
-Firecracker provisioner depends on Talos uncompressed kernel (`vmlinux`) and initramfs (`initramfs.xz`).
+Firecracker provisioner depends on Talos uncompressed kernel (`vmlinuz`) and initramfs (`initramfs.xz`).
 These files can be downloaded from the Talos release:
 
 ```bash
 mkdir -p _out/
-curl https://github.com/talos-systems/talos/releases/download/<version>/vmlinux -L -o _out/vmlinux
+curl https://github.com/talos-systems/talos/releases/download/<version>/vmlinuz -L -o _out/vmlinuz
 curl https://github.com/talos-systems/talos/releases/download/<version>/initramfs.xz -L -o _out/initramfs.xz
 ```
 
 For example version `v0.6.0`:
 
 ```bash
-curl https://github.com/talos-systems/talos/releases/download/v0.6.0/vmlinux -L -o _out/vmlinux
+curl https://github.com/talos-systems/talos/releases/download/v0.6.0/vmlinuz -L -o _out/vmlinuz
 curl https://github.com/talos-systems/talos/releases/download/v0.6.0/initramfs.xz -L -o _out/initramfs.xz
 ```
 

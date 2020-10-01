@@ -29,6 +29,10 @@
             "path": "v0.6/en/guides/local/docker"
           },
           {
+            "title": "QEMU",
+            "path": "v0.6/en/guides/local/qemu"
+          },
+          {
             "title": "Firecracker",
             "path": "v0.6/en/guides/local/firecracker"
           },
@@ -87,6 +91,7 @@
         ]
       },
       {
+<<<<<<< HEAD
         "title": "Upgrades",
         "path": "v0.6/en/guides/upgrades",
         "children": [
@@ -95,6 +100,10 @@
             "path": "v0.6/en/guides/upgrades/talos"
           }
         ]
+=======
+        "title": "Upgrading",
+        "path": "v0.6/en/guides/upgrading"
+>>>>>>> master
       }
     ]
   },
@@ -123,6 +132,10 @@
       {
         "title": "PKI",
         "path": "v0.6/en/troubleshooting/pki"
+      },
+      {
+        "title": "Machine Reset",
+        "path": "v0.6/en/troubleshooting/machine-reset"
       }
     ]
   },

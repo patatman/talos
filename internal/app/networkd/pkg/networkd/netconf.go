@@ -14,9 +14,9 @@ import (
 
 	"github.com/talos-systems/talos/internal/app/networkd/pkg/address"
 	"github.com/talos-systems/talos/internal/app/networkd/pkg/nic"
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1"
-	"github.com/talos-systems/talos/pkg/constants"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // buildOptions translates the supplied config to nic.Option used for
@@ -55,8 +55,10 @@ func buildOptions(device config.Device, hostname string) (name string, opts []ni
 
 			opts = append(opts, nic.WithNoAddressing())
 		} else {
-			d := &address.DHCP{}
-			opts = append(opts, nic.WithAddressing(d))
+			// No CIDR and DHCP==false results in a static without an IP.
+			// This handles cases like slaac addressing.
+			s := &address.Static{RouteList: device.Routes(), Mtu: device.MTU()}
+			opts = append(opts, nic.WithAddressing(s))
 		}
 	}
 

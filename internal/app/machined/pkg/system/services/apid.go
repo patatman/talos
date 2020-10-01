@@ -6,6 +6,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -14,9 +15,10 @@ import (
 	"strings"
 	"time"
 
-	containerdapi "github.com/containerd/containerd"
 	"github.com/containerd/containerd/oci"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/talos-systems/go-retry/retry"
 
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/events"
@@ -24,11 +26,11 @@ import (
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner/containerd"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner/restart"
-	"github.com/talos-systems/talos/internal/pkg/conditions"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
+	"github.com/talos-systems/talos/internal/pkg/containers/image"
+	"github.com/talos-systems/talos/pkg/conditions"
 	"github.com/talos-systems/talos/pkg/kubernetes"
-	"github.com/talos-systems/talos/pkg/retry"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // APID implements the Service interface. It serves as the concrete type with
@@ -42,14 +44,7 @@ func (o *APID) ID(r runtime.Runtime) string {
 
 // PreFunc implements the Service interface.
 func (o *APID) PreFunc(ctx context.Context, r runtime.Runtime) error {
-	importer := containerd.NewImporter(constants.SystemContainerdNamespace, containerd.WithContainerdAddress(constants.SystemContainerdAddress))
-
-	return importer.Import(&containerd.ImportRequest{
-		Path: "/usr/images/apid.tar",
-		Options: []containerdapi.ImportOpt{
-			containerdapi.WithIndexName("talos/apid"),
-		},
-	})
+	return image.Import(ctx, "/usr/images/apid.tar", "talos/apid")
 }
 
 // PostFunc implements the Service interface.
@@ -68,7 +63,7 @@ func (o *APID) Condition(r runtime.Runtime) conditions.Condition {
 
 // DependsOn implements the Service interface.
 func (o *APID) DependsOn(r runtime.Runtime) []string {
-	if r.State().Platform().Mode() == runtime.ModeContainer {
+	if r.State().Platform().Mode() == runtime.ModeContainer || !r.Config().Machine().Time().Enabled() {
 		return []string{"containerd", "networkd"}
 	}
 
@@ -117,7 +112,6 @@ func (o *APID) Runner(r runtime.Runtime) (runner.Runner, error) {
 		ID: o.ID(r),
 		ProcessArgs: []string{
 			"/apid",
-			"--config=" + constants.ConfigPath,
 			"--endpoints=" + strings.Join(endpoints, ","),
 		},
 	}
@@ -125,7 +119,6 @@ func (o *APID) Runner(r runtime.Runtime) (runner.Runner, error) {
 	// Set the mounts.
 	mounts := []specs.Mount{
 		{Type: "bind", Destination: "/etc/ssl", Source: "/etc/ssl", Options: []string{"bind", "ro"}},
-		{Type: "bind", Destination: constants.ConfigPath, Source: constants.ConfigPath, Options: []string{"rbind", "ro"}},
 		{Type: "bind", Destination: filepath.Dir(constants.RouterdSocketPath), Source: filepath.Dir(constants.RouterdSocketPath), Options: []string{"rbind", "ro"}},
 		{Type: "bind", Destination: filepath.Dir(constants.APISocketPath), Source: filepath.Dir(constants.APISocketPath), Options: []string{"rbind", "rw"}},
 	}
@@ -146,9 +139,17 @@ func (o *APID) Runner(r runtime.Runtime) (runner.Runner, error) {
 		}
 	}
 
+	b, err := r.Config().Bytes()
+	if err != nil {
+		return nil, err
+	}
+
+	stdin := bytes.NewReader(b)
+
 	return restart.New(containerd.NewRunner(
 		r.Config().Debug(),
 		&args,
+		runner.WithStdin(stdin),
 		runner.WithLoggingManager(r.Logging()),
 		runner.WithContainerdAddress(constants.SystemContainerdAddress),
 		runner.WithContainerImage(image),

@@ -32,12 +32,8 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 
-	"github.com/talos-systems/talos/api/cluster"
-	"github.com/talos-systems/talos/api/common"
-	"github.com/talos-systems/talos/api/machine"
-	osapi "github.com/talos-systems/talos/api/os"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime"
-	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader/syslinux"
+	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader/grub"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system"
 	"github.com/talos-systems/talos/internal/pkg/containers"
 	taloscontainerd "github.com/talos-systems/talos/internal/pkg/containers/containerd"
@@ -49,9 +45,13 @@ import (
 	"github.com/talos-systems/talos/pkg/archiver"
 	"github.com/talos-systems/talos/pkg/chunker"
 	"github.com/talos-systems/talos/pkg/chunker/stream"
-	"github.com/talos-systems/talos/pkg/config"
-	machinetype "github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
+	"github.com/talos-systems/talos/pkg/machinery/api/cluster"
+	"github.com/talos-systems/talos/pkg/machinery/api/common"
+	"github.com/talos-systems/talos/pkg/machinery/api/machine"
+	osapi "github.com/talos-systems/talos/pkg/machinery/api/os"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	machinetype "github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 	"github.com/talos-systems/talos/pkg/version"
 )
 
@@ -72,6 +72,31 @@ func (s *Server) Register(obj *grpc.Server) {
 	machine.RegisterMachineServiceServer(obj, s)
 	osapi.RegisterOSServiceServer(obj, &osdServer{Server: s}) //nolint: staticcheck
 	cluster.RegisterClusterServiceServer(obj, s)
+}
+
+// ApplyConfiguration implements machine.MachineServer.
+func (s *Server) ApplyConfiguration(ctx context.Context, in *machine.ApplyConfigurationRequest) (reply *machine.ApplyConfigurationResponse, err error) {
+	if err = s.Controller.Runtime().SetConfig(in.GetData()); err != nil {
+		return nil, err
+	}
+
+	go func() {
+		if err = s.Controller.Run(runtime.SequenceApplyConfiguration, in); err != nil {
+			log.Println("apply configuration failed:", err)
+
+			if err != runtime.ErrLocked {
+				s.server.GracefulStop()
+			}
+		}
+	}()
+
+	reply = &machine.ApplyConfigurationResponse{
+		Messages: []*machine.ApplyConfiguration{
+			{},
+		},
+	}
+
+	return reply, nil
 }
 
 // Reboot implements the machine.MachineServer interface.
@@ -107,7 +132,11 @@ func (s *Server) Reboot(ctx context.Context, in *empty.Empty) (reply *machine.Re
 func (s *Server) Rollback(ctx context.Context, in *machine.RollbackRequest) (reply *machine.RollbackResponse, err error) {
 	log.Printf("rollback via API received")
 
-	_, next, err := syslinux.Labels()
+	grub := &grub.Grub{
+		BootDisk: s.Controller.Runtime().Config().Machine().Install().Disk(),
+	}
+
+	_, next, err := grub.Labels()
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +145,7 @@ func (s *Server) Rollback(ctx context.Context, in *machine.RollbackRequest) (rep
 		return nil, fmt.Errorf("cannot rollback to %q, label does not exist", next)
 	}
 
-	if err := syslinux.RevertTo(next); err != nil {
+	if err := grub.Default(next); err != nil {
 		return nil, fmt.Errorf("failed to revert bootloader: %v", err)
 	}
 
@@ -211,7 +240,7 @@ func (s *Server) Upgrade(ctx context.Context, in *machine.UpgradeRequest) (reply
 		return nil, fmt.Errorf("error validating installer image %q: %w", in.GetImage(), err)
 	}
 
-	if err = etcd.ValidateForUpgrade(in.GetPreserve()); err != nil {
+	if err = etcd.ValidateForUpgrade(s.Controller.Runtime().Config(), in.GetPreserve()); err != nil {
 		return nil, fmt.Errorf("error validating etcd for upgrade: %w", err)
 	}
 

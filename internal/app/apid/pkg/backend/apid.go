@@ -16,9 +16,10 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/talos-systems/talos/api/common"
-	"github.com/talos-systems/talos/pkg/constants"
-	"github.com/talos-systems/talos/pkg/net"
+	"github.com/talos-systems/net"
+
+	"github.com/talos-systems/talos/pkg/machinery/api/common"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // APID backend performs proxying to another apid instance.

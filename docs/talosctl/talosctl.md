@@ -19,6 +19,7 @@ A CLI for out-of-band management of Kubernetes nodes created by Talos
 
 ### SEE ALSO
 
+* [talosctl apply-config](talosctl_apply-config.md)	 - Apply a new configuration to a node
 * [talosctl bootstrap](talosctl_bootstrap.md)	 - Bootstrap the cluster
 * [talosctl cluster](talosctl_cluster.md)	 - A collection of commands for managing local docker-based or firecracker-based clusters
 * [talosctl completion](talosctl_completion.md)	 - Output shell completion code for the specified shell (bash or zsh)
@@ -31,6 +32,7 @@ A CLI for out-of-band management of Kubernetes nodes created by Talos
 * [talosctl events](talosctl_events.md)	 - Stream runtime events
 * [talosctl gen](talosctl_gen.md)	 - Generate CAs, certificates, and private keys
 * [talosctl health](talosctl_health.md)	 - Check cluster health
+* [talosctl images](talosctl_images.md)	 - List the default images used by Talos
 * [talosctl interfaces](talosctl_interfaces.md)	 - List network interfaces
 * [talosctl kubeconfig](talosctl_kubeconfig.md)	 - Download the admin kubeconfig from the node
 * [talosctl list](talosctl_list.md)	 - Retrieve a directory listing
@@ -50,6 +52,7 @@ A CLI for out-of-band management of Kubernetes nodes created by Talos
 * [talosctl stats](talosctl_stats.md)	 - Get container stats
 * [talosctl time](talosctl_time.md)	 - Gets current server time
 * [talosctl upgrade](talosctl_upgrade.md)	 - Upgrade Talos on the target node
+* [talosctl upgrade-k8s](talosctl_upgrade-k8s.md)	 - Upgrade Kubernetes control plane in the Talos cluster.
 * [talosctl validate](talosctl_validate.md)	 - Validate config
 * [talosctl version](talosctl_version.md)	 - Prints the version
 

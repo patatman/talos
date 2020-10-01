@@ -21,9 +21,9 @@ import (
 	"github.com/talos-systems/talos/internal/integration/cli"
 	"github.com/talos-systems/talos/internal/integration/k8s"
 	provision_test "github.com/talos-systems/talos/internal/integration/provision"
-	"github.com/talos-systems/talos/internal/pkg/provision"
-	"github.com/talos-systems/talos/internal/pkg/provision/providers"
-	"github.com/talos-systems/talos/pkg/client/config"
+	"github.com/talos-systems/talos/pkg/machinery/client/config"
+	"github.com/talos-systems/talos/pkg/provision"
+	"github.com/talos-systems/talos/pkg/provision/providers"
 	"github.com/talos-systems/talos/pkg/version"
 )
 
@@ -140,6 +140,7 @@ func init() {
 	flag.IntVar(&provision_test.DefaultSettings.MasterNodes, "talos.provision.masters", provision_test.DefaultSettings.MasterNodes, "master node count (provision tests only)")
 	flag.IntVar(&provision_test.DefaultSettings.WorkerNodes, "talos.provision.workers", provision_test.DefaultSettings.WorkerNodes, "worker node count (provision tests only)")
 	flag.StringVar(&provision_test.DefaultSettings.TargetInstallImageRegistry, "talos.provision.target-installer-registry", provision_test.DefaultSettings.TargetInstallImageRegistry, "image registry for target installer image (provision tests only)")
+	flag.StringVar(&provision_test.DefaultSettings.CustomCNIURL, "talos.provision.custom-cni-url", provision_test.DefaultSettings.CustomCNIURL, "custom CNI URL for the cluster (provision tests only)")
 
 	allSuites = append(allSuites, api.GetAllSuites()...)
 	allSuites = append(allSuites, cli.GetAllSuites()...)

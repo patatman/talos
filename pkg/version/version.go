@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"text/template"
 
-	machineapi "github.com/talos-systems/talos/api/machine"
+	machineapi "github.com/talos-systems/talos/pkg/machinery/api/machine"
 )
 
 var (
@@ -22,6 +22,8 @@ var (
 	SHA string
 	// Built is set at build time.
 	Built string
+	// PkgsVersion is set at build time
+	PkgsVersion string
 )
 
 const versionTemplate = `	Tag:         {{ .Tag }}

@@ -12,28 +12,26 @@ import (
 	"net"
 	"os"
 	stdruntime "runtime"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	talosnet "github.com/talos-systems/net"
+
 	"github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
-	"github.com/talos-systems/talos/internal/pkg/cluster/check"
-	"github.com/talos-systems/talos/internal/pkg/provision"
-	"github.com/talos-systems/talos/internal/pkg/provision/access"
-	"github.com/talos-systems/talos/internal/pkg/provision/providers"
 	"github.com/talos-systems/talos/pkg/cli"
-	"github.com/talos-systems/talos/pkg/client"
-	clientconfig "github.com/talos-systems/talos/pkg/client/config"
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/bundle"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/generate"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
-	talosnet "github.com/talos-systems/talos/pkg/net"
-	"github.com/talos-systems/talos/pkg/retry"
+	"github.com/talos-systems/talos/pkg/cluster/check"
+	"github.com/talos-systems/talos/pkg/images"
+	clientconfig "github.com/talos-systems/talos/pkg/machinery/client/config"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/bundle"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/generate"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
+	"github.com/talos-systems/talos/pkg/provision"
+	"github.com/talos-systems/talos/pkg/provision/access"
+	"github.com/talos-systems/talos/pkg/provision/providers"
 )
 
 var (
@@ -45,6 +43,7 @@ var (
 	nodeVmlinuzPath         string
 	nodeInitramfsPath       string
 	bootloaderEnabled       bool
+	uefiEnabled             bool
 	configDebug             bool
 	networkCIDR             string
 	networkMTU              int
@@ -167,6 +166,7 @@ func create(ctx context.Context) (err error) {
 	provisionOptions := []provision.Option{
 		provision.WithDockerPortsHostIP(dockerHostIP),
 		provision.WithBootlader(bootloaderEnabled),
+		provision.WithUEFI(uefiEnabled),
 		provision.WithTargetArch(targetArch),
 	}
 	configBundleOpts := []bundle.Option{}
@@ -187,6 +187,7 @@ func create(ctx context.Context) (err error) {
 			generate.WithInstallImage(nodeInstallImage),
 			generate.WithDebug(configDebug),
 			generate.WithDNSDomain(dnsDomain),
+			generate.WithArchitecture(targetArch),
 		}
 
 		for _, registryMirror := range registryMirrors {
@@ -207,7 +208,7 @@ func create(ctx context.Context) (err error) {
 			}))
 		}
 
-		defaultInternalLB, _ := provisioner.GetLoadBalancers(request.Network)
+		defaultInternalLB, defaultEndpoint := provisioner.GetLoadBalancers(request.Network)
 
 		if defaultInternalLB == "" {
 			// provisioner doesn't provide internal LB, so use first master node
@@ -217,6 +218,12 @@ func create(ctx context.Context) (err error) {
 		var endpointList []string
 
 		switch {
+		case defaultEndpoint != "":
+			if forceEndpoint == "" {
+				forceEndpoint = defaultEndpoint
+			}
+
+			fallthrough
 		case forceEndpoint != "":
 			endpointList = []string{forceEndpoint}
 			provisionOptions = append(provisionOptions, provision.WithEndpoint(forceEndpoint))
@@ -298,7 +305,7 @@ func create(ctx context.Context) (err error) {
 	}
 
 	// Create and save the talosctl configuration file.
-	if err = saveConfig(cluster, configBundle.TalosConfig()); err != nil {
+	if err = saveConfig(configBundle.TalosConfig()); err != nil {
 		return err
 	}
 
@@ -313,51 +320,13 @@ func create(ctx context.Context) (err error) {
 		return err
 	}
 
-	return nil
+	return showCluster(cluster)
 }
 
 func postCreate(ctx context.Context, clusterAccess *access.Adapter) error {
 	if !withInitNode {
-		cli, err := clusterAccess.Client()
-		if err != nil {
-			return retry.UnexpectedError(err)
-		}
-
-		nodes := clusterAccess.NodesByType(machine.TypeControlPlane)
-		if len(nodes) == 0 {
-			return fmt.Errorf("expected at least 1 control plane node, got %d", len(nodes))
-		}
-
-		sort.Strings(nodes)
-
-		node := nodes[0]
-
-		nodeCtx := client.WithNodes(ctx, node)
-
-		fmt.Println("waiting for API")
-
-		err = retry.Constant(5*time.Minute, retry.WithUnits(500*time.Millisecond)).Retry(func() error {
-			retryCtx, cancel := context.WithTimeout(nodeCtx, 500*time.Millisecond)
-			defer cancel()
-
-			if _, err = cli.Version(retryCtx); err != nil {
-				return retry.ExpectedError(err)
-			}
-
-			return nil
-		})
-
-		if err != nil {
-			return err
-		}
-
-		fmt.Println("bootstrapping cluster")
-
-		bootstrapCtx, cancel := context.WithTimeout(nodeCtx, 30*time.Second)
-		defer cancel()
-
-		if err = cli.Bootstrap(bootstrapCtx); err != nil {
-			return err
+		if err := clusterAccess.Bootstrap(ctx, os.Stdout); err != nil {
+			return fmt.Errorf("bootstrap error: %w", err)
 		}
 	}
 
@@ -372,19 +341,13 @@ func postCreate(ctx context.Context, clusterAccess *access.Adapter) error {
 	return check.Wait(checkCtx, clusterAccess, append(check.DefaultClusterChecks(), check.ExtraClusterChecks()...), check.StderrReporter())
 }
 
-func saveConfig(cluster provision.Cluster, talosConfigObj *clientconfig.Config) (err error) {
+func saveConfig(talosConfigObj *clientconfig.Config) (err error) {
 	c, err := clientconfig.Open(talosconfig)
 	if err != nil {
 		return err
 	}
 
-	if c.Contexts == nil {
-		c.Contexts = map[string]*clientconfig.Context{}
-	}
-
-	c.Contexts[cluster.Info().ClusterName] = talosConfigObj.Contexts[cluster.Info().ClusterName]
-
-	c.Context = cluster.Info().ClusterName
+	c.Merge(talosConfigObj)
 
 	return c.Save(talosconfig)
 }
@@ -410,11 +373,12 @@ func init() {
 	}
 
 	createCmd.Flags().StringVar(&talosconfig, "talosconfig", defaultTalosConfig, "The path to the Talos configuration file")
-	createCmd.Flags().StringVar(&nodeImage, "image", helpers.DefaultImage(constants.DefaultTalosImageRepository), "the image to use")
-	createCmd.Flags().StringVar(&nodeInstallImage, "install-image", helpers.DefaultImage(constants.DefaultInstallerImageRepository), "the installer image to use")
-	createCmd.Flags().StringVar(&nodeVmlinuzPath, "vmlinuz-path", helpers.ArtifactPath(constants.KernelAsset), "the compressed kernel image to use")
-	createCmd.Flags().StringVar(&nodeInitramfsPath, "initrd-path", helpers.ArtifactPath(constants.InitramfsAsset), "the uncompressed kernel image to use")
+	createCmd.Flags().StringVar(&nodeImage, "image", helpers.DefaultImage(images.DefaultTalosImageRepository), "the image to use")
+	createCmd.Flags().StringVar(&nodeInstallImage, "install-image", helpers.DefaultImage(images.DefaultInstallerImageRepository), "the installer image to use")
+	createCmd.Flags().StringVar(&nodeVmlinuzPath, "vmlinuz-path", helpers.ArtifactPath(constants.KernelAssetWithArch), "the compressed kernel image to use")
+	createCmd.Flags().StringVar(&nodeInitramfsPath, "initrd-path", helpers.ArtifactPath(constants.InitramfsAssetWithArch), "the uncompressed kernel image to use")
 	createCmd.Flags().BoolVar(&bootloaderEnabled, "with-bootloader", true, "enable bootloader to load kernel and initramfs from disk image after install")
+	createCmd.Flags().BoolVar(&uefiEnabled, "with-uefi", false, "enable UEFI on x86_64 architecture (always enabled for arm64)")
 	createCmd.Flags().StringSliceVar(&registryMirrors, "registry-mirror", []string{}, "list of registry mirrors to use in format: <registry host>=<mirror URL>")
 	createCmd.Flags().BoolVar(&configDebug, "with-debug", false, "enable debug in Talos config to send service logs to the console")
 	createCmd.Flags().IntVar(&networkMTU, "mtu", 1500, "MTU of the cluster network")
@@ -422,15 +386,15 @@ func init() {
 	createCmd.Flags().StringSliceVar(&nameservers, "nameservers", []string{"8.8.8.8", "1.1.1.1"}, "list of nameservers to use")
 	createCmd.Flags().IntVar(&workers, "workers", 1, "the number of workers to create")
 	createCmd.Flags().IntVar(&masters, "masters", 1, "the number of masters to create")
-	createCmd.Flags().StringVar(&clusterCpus, "cpus", "1.5", "the share of CPUs as fraction (each container)")
-	createCmd.Flags().IntVar(&clusterMemory, "memory", 1024, "the limit on memory usage in MB (each container)")
-	createCmd.Flags().IntVar(&clusterDiskSize, "disk", 4*1024, "the limit on disk size in MB (each VM)")
+	createCmd.Flags().StringVar(&clusterCpus, "cpus", "2.0", "the share of CPUs as fraction (each container/VM)")
+	createCmd.Flags().IntVar(&clusterMemory, "memory", 2048, "the limit on memory usage in MB (each container/VM)")
+	createCmd.Flags().IntVar(&clusterDiskSize, "disk", 6*1024, "the limit on disk size in MB (each VM)")
 	createCmd.Flags().StringVar(&targetArch, "arch", stdruntime.GOARCH, "cluster architecture")
 	createCmd.Flags().BoolVar(&clusterWait, "wait", true, "wait for the cluster to be ready before returning")
 	createCmd.Flags().DurationVar(&clusterWaitTimeout, "wait-timeout", 20*time.Minute, "timeout to wait for the cluster to be ready")
 	createCmd.Flags().BoolVar(&forceInitNodeAsEndpoint, "init-node-as-endpoint", false, "use init node as endpoint instead of any load balancer endpoint")
 	createCmd.Flags().StringVar(&forceEndpoint, "endpoint", "", "use endpoint instead of provider defaults")
-	createCmd.Flags().StringVar(&kubernetesVersion, "kubernetes-version", constants.DefaultKubernetesVersion, "desired kubernetes version to run")
+	createCmd.Flags().StringVar(&kubernetesVersion, "kubernetes-version", "", fmt.Sprintf("desired kubernetes version to run (default %q)", constants.DefaultKubernetesVersion))
 	createCmd.Flags().StringVarP(&inputDir, "input-dir", "i", "", "location of pre-generated config files")
 	createCmd.Flags().StringSliceVar(&cniBinPath, "cni-bin-path", []string{"/opt/cni/bin"}, "search path for CNI binaries (VM only)")
 	createCmd.Flags().StringVar(&cniConfDir, "cni-conf-dir", "/etc/cni/conf.d", "CNI config directory path (VM only)")
@@ -442,7 +406,7 @@ func init() {
 		"Comma-separated list of ports/protocols to expose on init node. Ex -p <hostPort>:<containerPort>/<protocol (tcp or udp)> (Docker provisioner only)",
 	)
 	createCmd.Flags().StringVar(&dockerHostIP, "docker-host-ip", "0.0.0.0", "Host IP to forward exposed ports to (Docker provisioner only)")
-	createCmd.Flags().BoolVar(&withInitNode, "with-init-node", true, "create the cluster with an init node")
+	createCmd.Flags().BoolVar(&withInitNode, "with-init-node", false, "create the cluster with an init node")
 	createCmd.Flags().StringVar(&customCNIUrl, "custom-cni-url", "", "install custom CNI from the URL (Talos cluster)")
 	createCmd.Flags().StringVar(&dnsDomain, "dns-domain", "cluster.local", "the dns domain to use for cluster")
 	createCmd.Flags().BoolVar(&crashdumpOnFailure, "crashdump", false, "print debug crashdump to stderr when cluster startup fails")

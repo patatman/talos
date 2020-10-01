@@ -20,14 +20,14 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/talos-systems/talos/api/common"
-	"github.com/talos-systems/talos/api/machine"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/logging"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/acpi"
 	"github.com/talos-systems/talos/internal/pkg/kmsg"
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/config/configloader"
+	"github.com/talos-systems/talos/pkg/machinery/api/common"
+	"github.com/talos-systems/talos/pkg/machinery/api/machine"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/config/configloader"
 )
 
 // Controller represents the controller responsible for managing the execution
@@ -353,6 +353,17 @@ func (c *Controller) phases(seq runtime.Sequence, data interface{}) ([]runtime.P
 	var phases []runtime.Phase
 
 	switch seq {
+	case runtime.SequenceApplyConfiguration:
+		var (
+			in *machine.ApplyConfigurationRequest
+			ok bool
+		)
+
+		if in, ok = data.(*machine.ApplyConfigurationRequest); !ok {
+			return nil, runtime.ErrInvalidSequenceData
+		}
+
+		phases = c.s.ApplyConfiguration(c.r, in)
 	case runtime.SequenceBoot:
 		phases = c.s.Boot(c.r)
 	case runtime.SequenceBootstrap:

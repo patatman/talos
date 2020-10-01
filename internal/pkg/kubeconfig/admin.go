@@ -11,9 +11,10 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/constants"
-	"github.com/talos-systems/talos/pkg/crypto/x509"
+	"github.com/talos-systems/crypto/x509"
+
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 const adminKubeConfigTemplate = `apiVersion: v1
@@ -24,7 +25,7 @@ clusters:
     server: {{ .Server }}
     certificate-authority-data: {{ .CACert }}
 users:
-- name: admin
+- name: admin@{{ .Cluster }}
   user:
     client-certificate-data: {{ .AdminCert }}
     client-key-data: {{ .AdminKey }}
@@ -32,7 +33,7 @@ contexts:
 - context:
     cluster: {{ .Cluster }}
     namespace: default
-    user: admin
+    user: admin@{{ .Cluster }}
   name: admin@{{ .Cluster }}
 current-context: admin@{{ .Cluster }}
 `

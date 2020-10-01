@@ -15,27 +15,33 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/stretchr/testify/suite"
+	"github.com/talos-systems/go-retry/retry"
+	talosnet "github.com/talos-systems/net"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	machineapi "github.com/talos-systems/talos/api/machine"
 	"github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
 	"github.com/talos-systems/talos/internal/integration/base"
-	"github.com/talos-systems/talos/internal/pkg/cluster/check"
-	"github.com/talos-systems/talos/internal/pkg/provision"
-	"github.com/talos-systems/talos/internal/pkg/provision/access"
-	"github.com/talos-systems/talos/internal/pkg/provision/providers/qemu"
-	talosclient "github.com/talos-systems/talos/pkg/client"
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/bundle"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/generate"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
-	talosnet "github.com/talos-systems/talos/pkg/net"
-	"github.com/talos-systems/talos/pkg/retry"
+	"github.com/talos-systems/talos/pkg/cluster/check"
+	"github.com/talos-systems/talos/pkg/cluster/kubernetes"
+	"github.com/talos-systems/talos/pkg/cluster/sonobuoy"
+	"github.com/talos-systems/talos/pkg/images"
+	machineapi "github.com/talos-systems/talos/pkg/machinery/api/machine"
+	talosclient "github.com/talos-systems/talos/pkg/machinery/client"
+	clientconfig "github.com/talos-systems/talos/pkg/machinery/client/config"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/bundle"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/generate"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
+	"github.com/talos-systems/talos/pkg/provision"
+	"github.com/talos-systems/talos/pkg/provision/access"
+	"github.com/talos-systems/talos/pkg/provision/providers/qemu"
 )
 
 type upgradeSpec struct {
@@ -45,9 +51,11 @@ type upgradeSpec struct {
 	SourceInitramfsPath  string
 	SourceInstallerImage string
 	SourceVersion        string
+	SourceK8sVersion     string
 
 	TargetInstallerImage string
 	TargetVersion        string
+	TargetK8sVersion     string
 
 	MasterNodes int
 	WorkerNodes int
@@ -57,7 +65,11 @@ type upgradeSpec struct {
 
 const (
 	stableVersion = "v0.5.1"
-	nextVersion   = "v0.6.0-alpha.6"
+	nextVersion   = "v0.6.0"
+
+	stableK8sVersion  = "1.18.6"
+	nextK8sVersion    = "1.19.0"
+	currentK8sVersion = "1.19.1"
 )
 
 var (
@@ -80,13 +92,17 @@ func upgradeBetweenTwoLastReleases() upgradeSpec {
 	return upgradeSpec{
 		ShortName: fmt.Sprintf("%s-%s", stableVersion, nextVersion),
 
-		SourceKernelPath:     helpers.ArtifactPath(filepath.Join(trimVersion(stableVersion), constants.KernelAsset)),
-		SourceInitramfsPath:  helpers.ArtifactPath(filepath.Join(trimVersion(stableVersion), constants.InitramfsAsset)),
-		SourceInstallerImage: fmt.Sprintf("%s:%s", constants.DefaultInstallerImageRepository, stableVersion),
+		SourceKernelPath:    helpers.ArtifactPath(filepath.Join(trimVersion(stableVersion), constants.KernelAsset)),
+		SourceInitramfsPath: helpers.ArtifactPath(filepath.Join(trimVersion(stableVersion), constants.InitramfsAsset)),
+		// TODO: update to images.DefaultInstallerImageRepository once stableVersion migrates to gchr.io
+		SourceInstallerImage: fmt.Sprintf("%s:%s", "docker.io/autonomy/installer", stableVersion),
 		SourceVersion:        stableVersion,
+		SourceK8sVersion:     stableK8sVersion,
 
-		TargetInstallerImage: fmt.Sprintf("%s:%s", constants.DefaultInstallerImageRepository, nextVersion),
+		// TODO: update to images.DefaultInstallerImageRepository once stableVersion migrates to gchr.io
+		TargetInstallerImage: fmt.Sprintf("%s:%s", "docker.io/autonomy/installer", nextVersion),
 		TargetVersion:        nextVersion,
+		TargetK8sVersion:     nextK8sVersion,
 
 		MasterNodes: DefaultSettings.MasterNodes,
 		WorkerNodes: DefaultSettings.WorkerNodes,
@@ -98,13 +114,16 @@ func upgradeLastReleaseToCurrent() upgradeSpec {
 	return upgradeSpec{
 		ShortName: fmt.Sprintf("%s-%s", nextVersion, DefaultSettings.CurrentVersion),
 
-		SourceKernelPath:     helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.KernelAsset)),
-		SourceInitramfsPath:  helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.InitramfsAsset)),
-		SourceInstallerImage: fmt.Sprintf("%s:%s", constants.DefaultInstallerImageRepository, nextVersion),
+		SourceKernelPath:    helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.KernelAsset)),
+		SourceInitramfsPath: helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.InitramfsAsset)),
+		// TODO: update to images.DefaultInstallerImageRepository once stableVersion migrates to gchr.io
+		SourceInstallerImage: fmt.Sprintf("%s:%s", "docker.io/autonomy/installer", nextVersion),
 		SourceVersion:        nextVersion,
+		SourceK8sVersion:     nextK8sVersion,
 
-		TargetInstallerImage: fmt.Sprintf("%s/%s:%s", DefaultSettings.TargetInstallImageRegistry, constants.DefaultInstallerImageName, DefaultSettings.CurrentVersion),
+		TargetInstallerImage: fmt.Sprintf("%s/%s:%s", DefaultSettings.TargetInstallImageRegistry, images.DefaultInstallerImageName, DefaultSettings.CurrentVersion),
 		TargetVersion:        DefaultSettings.CurrentVersion,
+		TargetK8sVersion:     currentK8sVersion,
 
 		MasterNodes: DefaultSettings.MasterNodes,
 		WorkerNodes: DefaultSettings.WorkerNodes,
@@ -116,13 +135,15 @@ func upgradeSingeNodePreserve() upgradeSpec {
 	return upgradeSpec{
 		ShortName: fmt.Sprintf("preserve-%s-%s", nextVersion, DefaultSettings.CurrentVersion),
 
-		SourceKernelPath:     helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.KernelAsset)),
-		SourceInitramfsPath:  helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.InitramfsAsset)),
-		SourceInstallerImage: fmt.Sprintf("%s:%s", constants.DefaultInstallerImageRepository, nextVersion),
+		SourceKernelPath:    helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.KernelAsset)),
+		SourceInitramfsPath: helpers.ArtifactPath(filepath.Join(trimVersion(nextVersion), constants.InitramfsAsset)),
+		// TODO: update to images.DefaultInstallerImageRepository once stableVersion migrates to gchr.io
+		SourceInstallerImage: fmt.Sprintf("%s:%s", "docker.io/autonomy/installer", nextVersion),
 		SourceVersion:        nextVersion,
 
-		TargetInstallerImage: fmt.Sprintf("%s/%s:%s", DefaultSettings.TargetInstallImageRegistry, constants.DefaultInstallerImageName, DefaultSettings.CurrentVersion),
+		TargetInstallerImage: fmt.Sprintf("%s/%s:%s", DefaultSettings.TargetInstallImageRegistry, images.DefaultInstallerImageName, DefaultSettings.CurrentVersion),
 		TargetVersion:        DefaultSettings.CurrentVersion,
+		TargetK8sVersion:     nextK8sVersion,
 
 		MasterNodes:     1,
 		WorkerNodes:     0,
@@ -262,6 +283,13 @@ func (suite *UpgradeSuite) setupCluster() {
 		masterEndpoints[i] = ips[i].String()
 	}
 
+	if DefaultSettings.CustomCNIURL != "" {
+		genOptions = append(genOptions, generate.WithClusterCNIConfig(&v1alpha1.CNIConfig{
+			CNIName: "custom",
+			CNIUrls: []string{DefaultSettings.CustomCNIURL},
+		}))
+	}
+
 	suite.configBundle, err = bundle.NewConfigBundle(bundle.WithInputOptions(
 		&bundle.InputOptions{
 			ClusterName: clusterName,
@@ -271,6 +299,7 @@ func (suite *UpgradeSuite) setupCluster() {
 				genOptions,
 				generate.WithEndpointList(masterEndpoints),
 				generate.WithInstallImage(suite.spec.SourceInstallerImage),
+				generate.WithDNSDomain("cluster.local"),
 			),
 		}))
 	suite.Require().NoError(err)
@@ -310,6 +339,16 @@ func (suite *UpgradeSuite) setupCluster() {
 	suite.Cluster, err = suite.provisioner.Create(suite.ctx, request, provision.WithBootlader(true), provision.WithTalosConfig(suite.configBundle.TalosConfig()))
 	suite.Require().NoError(err)
 
+	defaultTalosConfig, err := clientconfig.GetDefaultPath()
+	suite.Require().NoError(err)
+
+	c, err := clientconfig.Open(defaultTalosConfig)
+	suite.Require().NoError(err)
+
+	c.Merge(suite.configBundle.TalosConfig())
+
+	suite.Require().NoError(c.Save(defaultTalosConfig))
+
 	suite.clusterAccess = access.NewAdapter(suite.Cluster, provision.WithTalosConfig(suite.configBundle.TalosConfig()))
 
 	suite.waitForClusterHealth()
@@ -321,6 +360,14 @@ func (suite *UpgradeSuite) waitForClusterHealth() {
 	defer checkCtxCancel()
 
 	suite.Require().NoError(check.Wait(checkCtx, suite.clusterAccess, check.DefaultClusterChecks(), check.StderrReporter()))
+}
+
+// runE2E runs e2e test on the cluster.
+func (suite *UpgradeSuite) runE2E(k8sVersion string) {
+	options := sonobuoy.DefaultOptions()
+	options.KubernetesVersion = k8sVersion
+
+	suite.Assert().NoError(sonobuoy.Run(suite.ctx, suite.clusterAccess, options))
 }
 
 func (suite *UpgradeSuite) assertSameVersionCluster(client *talosclient.Client, expectedVersion string) {
@@ -365,6 +412,22 @@ func (suite *UpgradeSuite) readVersion(client *talosclient.Client, nodeCtx conte
 	return
 }
 
+func (suite *UpgradeSuite) uncordonNodes() {
+	clientset, err := suite.clusterAccess.K8sClient(suite.ctx)
+	suite.Require().NoError(err)
+
+	nodes, err := clientset.CoreV1().Nodes().List(suite.ctx, metav1.ListOptions{})
+	suite.Require().NoError(err)
+
+	for _, node := range nodes.Items {
+		if node.Spec.Unschedulable {
+			suite.T().Logf("uncordoning node %q", node.Name)
+
+			suite.Require().NoError(suite.clusterAccess.KubeHelper.Uncordon(node.Name, true))
+		}
+	}
+}
+
 func (suite *UpgradeSuite) upgradeNode(client *talosclient.Client, node provision.NodeInfo) {
 	suite.T().Logf("upgrading node %s", node.PrivateIP)
 
@@ -393,7 +456,21 @@ func (suite *UpgradeSuite) upgradeNode(client *talosclient.Client, node provisio
 		return nil
 	}))
 
+	suite.uncordonNodes()
+
 	suite.waitForClusterHealth()
+}
+
+func (suite *UpgradeSuite) upgradeKubernetes(fromVersion, toVersion string) {
+	if fromVersion == toVersion {
+		suite.T().Logf("skipping Kubernetes upgrade, as versions are equal %q -> %q", fromVersion, toVersion)
+
+		return
+	}
+
+	suite.T().Logf("upgrading Kubernetes: %q -> %q", fromVersion, toVersion)
+
+	suite.Require().NoError(kubernetes.Upgrade(suite.ctx, suite.clusterAccess, runtime.GOARCH, fromVersion, toVersion))
 }
 
 // TestRolling performs rolling upgrade starting with master nodes.
@@ -405,6 +482,9 @@ func (suite *UpgradeSuite) TestRolling() {
 
 	// verify initial cluster version
 	suite.assertSameVersionCluster(client, suite.spec.SourceVersion)
+
+	// upgrade Kubernetes if required
+	suite.upgradeKubernetes(suite.spec.SourceK8sVersion, suite.spec.TargetK8sVersion)
 
 	// upgrade master nodes
 	for _, node := range suite.Cluster.Info().Nodes {
@@ -422,6 +502,9 @@ func (suite *UpgradeSuite) TestRolling() {
 
 	// verify final cluster version
 	suite.assertSameVersionCluster(client, suite.spec.TargetVersion)
+
+	// run e2e test
+	suite.runE2E(suite.spec.TargetK8sVersion)
 }
 
 // SuiteName ...
@@ -437,6 +520,6 @@ func init() {
 	allSuites = append(allSuites,
 		&UpgradeSuite{specGen: upgradeBetweenTwoLastReleases, track: 0},
 		&UpgradeSuite{specGen: upgradeLastReleaseToCurrent, track: 1},
-		&UpgradeSuite{specGen: upgradeSingeNodePreserve, track: 0},
+		// &UpgradeSuite{specGen: upgradeSingeNodePreserve, track: 0},
 	)
 }

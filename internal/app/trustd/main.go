@@ -13,22 +13,21 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	"github.com/talos-systems/net"
+
+	"github.com/talos-systems/crypto/tls"
+
 	"github.com/talos-systems/talos/internal/app/trustd/internal/reg"
-	"github.com/talos-systems/talos/pkg/config/configloader"
-	"github.com/talos-systems/talos/pkg/constants"
 	"github.com/talos-systems/talos/pkg/grpc/factory"
+	"github.com/talos-systems/talos/pkg/grpc/gen"
 	"github.com/talos-systems/talos/pkg/grpc/middleware/auth/basic"
-	"github.com/talos-systems/talos/pkg/grpc/tls"
-	"github.com/talos-systems/talos/pkg/net"
+	"github.com/talos-systems/talos/pkg/machinery/config/configloader"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 	"github.com/talos-systems/talos/pkg/startup"
 )
 
-var configPath *string
-
 func init() {
 	log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds | log.Ltime)
-
-	configPath = flag.String("config", "", "the path to the config")
 
 	flag.Parse()
 }
@@ -41,9 +40,9 @@ func main() {
 		log.Fatalf("startup: %s", err)
 	}
 
-	config, err := configloader.NewFromFile(*configPath)
+	config, err := configloader.NewFromStdin()
 	if err != nil {
-		log.Fatalf("failed to create config from file: %v", err)
+		log.Fatal(err)
 	}
 
 	ips, err := net.IPAddrs()
@@ -64,9 +63,16 @@ func main() {
 		}
 	}
 
+	var generator tls.Generator
+
+	generator, err = gen.NewLocalGenerator(config.Machine().Security().CA().Key, config.Machine().Security().CA().Crt)
+	if err != nil {
+		log.Fatalln("failed to create local generator provider:", err)
+	}
+
 	var provider tls.CertificateProvider
 
-	provider, err = tls.NewLocalRenewingFileCertificateProvider(config.Machine().Security().CA().Key, config.Machine().Security().CA().Crt, dnsNames, ips)
+	provider, err = tls.NewRenewingCertificateProvider(generator, dnsNames, ips)
 	if err != nil {
 		log.Fatalln("failed to create local certificate provider:", err)
 	}

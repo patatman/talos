@@ -1,10 +1,41 @@
-# syntax = docker/dockerfile-upstream:1.1.2-experimental
+# syntax = docker/dockerfile-upstream:1.1.7-experimental
 
 # Meta args applied to stage base names.
 
 ARG TOOLS
+ARG IMPORTVET
+ARG PKGS
+
+# Resolve package images using ${PKGS} to be used later in COPY --from=.
+
+FROM ghcr.io/talos-systems/fhs:${PKGS} AS pkg-fhs
+FROM ghcr.io/talos-systems/ca-certificates:${PKGS} AS pkg-ca-certificates
+FROM ghcr.io/talos-systems/containerd:${PKGS} AS pkg-containerd
+FROM ghcr.io/talos-systems/dosfstools:${PKGS} AS pkg-dosfstools
+FROM ghcr.io/talos-systems/eudev:${PKGS} AS pkg-eudev
+FROM ghcr.io/talos-systems/grub:${PKGS} AS pkg-grub
+FROM ghcr.io/talos-systems/iptables:${PKGS} AS pkg-iptables
+FROM ghcr.io/talos-systems/libressl:${PKGS} AS pkg-libressl
+FROM ghcr.io/talos-systems/libseccomp:${PKGS} AS pkg-libseccomp
+FROM ghcr.io/talos-systems/linux-firmware:${PKGS} AS pkg-linux-firmware
+FROM ghcr.io/talos-systems/linux-firmware:${PKGS} AS pkg-linux-firmware
+FROM ghcr.io/talos-systems/lvm2:${PKGS} AS pkg-lvm2
+FROM ghcr.io/talos-systems/libaio:${PKGS} AS pkg-libaio
+FROM ghcr.io/talos-systems/musl:${PKGS} AS pkg-musl
+FROM ghcr.io/talos-systems/open-iscsi:${PKGS} AS pkg-open-iscsi
+FROM ghcr.io/talos-systems/open-isns:${PKGS} AS pkg-open-isns
+FROM ghcr.io/talos-systems/runc:${PKGS} AS pkg-runc
+FROM ghcr.io/talos-systems/socat:${PKGS} AS pkg-socat
+FROM ghcr.io/talos-systems/xfsprogs:${PKGS} AS pkg-xfsprogs
+FROM ghcr.io/talos-systems/util-linux:${PKGS} AS pkg-util-linux
+FROM ghcr.io/talos-systems/util-linux:${PKGS} AS pkg-util-linux
+FROM ghcr.io/talos-systems/util-linux:${PKGS} AS pkg-util-linux
+FROM ghcr.io/talos-systems/kmod:${PKGS} AS pkg-kmod
+FROM ghcr.io/talos-systems/kernel:${PKGS} AS pkg-kernel
 
 # The tools target provides base toolchain for the build.
+
+FROM $IMPORTVET as importvet
 
 FROM $TOOLS AS tools
 ENV PATH /toolchain/bin:/toolchain/go/bin
@@ -22,6 +53,7 @@ COPY ./hack/docgen /go/src/github.com/talos-systems/docgen
 RUN cd /go/src/github.com/talos-systems/docgen \
     && go build . \
     && mv docgen /toolchain/go/bin/
+COPY --from=importvet /importvet /toolchain/go/bin/importvet
 
 # The build target creates a container that will be used to build Talos source
 # code.
@@ -59,27 +91,27 @@ RUN protoc -I/api --go_out=plugins=grpc,paths=source_relative:/api cluster/clust
 RUN gofumports -w -local github.com/talos-systems/talos /api/
 
 FROM scratch AS generate
-COPY --from=generate-build /api/common/common.pb.go /api/common/
-COPY --from=generate-build /api/health/health.pb.go /api/health/
-COPY --from=generate-build /api/os/os.pb.go /api/os/
-COPY --from=generate-build /api/security/security.pb.go /api/security/
-COPY --from=generate-build /api/machine/machine.pb.go /api/machine/
-COPY --from=generate-build /api/time/time.pb.go /api/time/
-COPY --from=generate-build /api/network/network.pb.go /api/network/
-COPY --from=generate-build /api/cluster/cluster.pb.go /api/cluster/
+COPY --from=generate-build /api/common/common.pb.go /pkg/machinery/api/common/
+COPY --from=generate-build /api/health/health.pb.go /pkg/machinery/api/health/
+COPY --from=generate-build /api/os/os.pb.go /pkg/machinery/api/os/
+COPY --from=generate-build /api/security/security.pb.go /pkg/machinery/api/security/
+COPY --from=generate-build /api/machine/machine.pb.go /pkg/machinery/api/machine/
+COPY --from=generate-build /api/time/time.pb.go /pkg/machinery/api/time/
+COPY --from=generate-build /api/network/network.pb.go /pkg/machinery/api/network/
+COPY --from=generate-build /api/cluster/cluster.pb.go /pkg/machinery/api/cluster/
 
 # The base target provides a container that can be used to build all Talos
 # assets.
 
 FROM build AS base
-COPY ./go.mod ./
-COPY ./go.sum ./
+COPY ./go.mod ./go.sum ./
+COPY ./pkg/machinery/go.mod ./pkg/machinery/go.sum ./pkg/machinery/
 RUN go mod download
 RUN go mod verify
 COPY ./cmd ./cmd
 COPY ./pkg ./pkg
 COPY ./internal ./internal
-COPY --from=generate /api ./api
+COPY --from=generate /pkg/machinery/api ./pkg/machinery/api
 RUN go list -mod=readonly all >/dev/null
 RUN ! go mod tidy -v 2>&1 | grep .
 
@@ -88,9 +120,10 @@ RUN ! go mod tidy -v 2>&1 | grep .
 FROM base AS init-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
 WORKDIR /src/internal/app/init
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Talos -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /init
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Talos -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS}" -o /init
 RUN chmod +x /init
 
 FROM scratch AS init
@@ -101,9 +134,13 @@ COPY --from=init-build /init /init
 FROM base AS machined-build
 ARG SHA
 ARG TAG
+ARG PKGS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 WORKDIR /src/internal/app/machined
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Talos -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /machined
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Talos -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${IMAGES_PKGS}.Registry=${REGISTRY}" -o /machined
 RUN chmod +x /machined
 
 FROM scratch AS machined
@@ -114,9 +151,10 @@ COPY --from=machined-build /machined /machined
 FROM base AS timed-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
 WORKDIR /src/internal/app/timed
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /timed
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS}" -o /timed
 RUN chmod +x /timed
 
 FROM base AS timed-image
@@ -132,9 +170,10 @@ RUN --security=insecure img build --tag ${USERNAME}/timed:${TAG} --output type=d
 FROM base AS apid-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
 WORKDIR /src/internal/app/apid
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /apid
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS}" -o /apid
 RUN chmod +x /apid
 
 FROM base AS apid-image
@@ -150,9 +189,10 @@ RUN --security=insecure img build --tag ${USERNAME}/apid:${TAG} --output type=do
 FROM base AS trustd-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
 WORKDIR /src/internal/app/trustd
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /trustd
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS}" -o /trustd
 RUN chmod +x /trustd
 
 FROM base AS trustd-image
@@ -168,9 +208,10 @@ RUN --security=insecure img build --tag ${USERNAME}/trustd:${TAG} --output type=
 FROM base AS networkd-build
 ARG SHA
 ARG TAG
-ARG VERSION_PKG="github.com/talos-systems/talos/internal/pkg/version"
+ARG PKGS
+ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
 WORKDIR /src/internal/app/networkd
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /networkd
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS}" -o /networkd
 RUN chmod +x /networkd
 
 FROM base AS networkd-image
@@ -186,9 +227,10 @@ RUN --security=insecure img build --tag ${USERNAME}/networkd:${TAG} --output typ
 FROM base AS routerd-build
 ARG SHA
 ARG TAG
-ARG VERSION_PKG="github.com/talos-systems/talos/internal/pkg/version"
+ARG PKGS
+ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
 WORKDIR /src/internal/app/routerd
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /routerd
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS}" -o /routerd
 RUN chmod +x /routerd
 
 FROM base AS routerd-image
@@ -205,9 +247,10 @@ RUN --security=insecure img build --tag ${USERNAME}/routerd:${TAG} --output type
 FROM base AS bootkube-build
 ARG SHA
 ARG TAG
-ARG VERSION_PKG="github.com/talos-systems/talos/internal/pkg/version"
+ARG PKGS
+ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
 WORKDIR /src/internal/app/bootkube
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /bootkube
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Server -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS}" -o /bootkube
 RUN chmod +x /bootkube
 
 FROM base AS bootkube-image
@@ -224,31 +267,43 @@ RUN --security=insecure img build --tag ${USERNAME}/bootkube:${TAG} --output typ
 FROM base AS talosctl-linux-amd64-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG ARTIFACTS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 ARG MGMT_HELPERS_PKG="github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
 WORKDIR /src/cmd/talosctl
-RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-linux-amd64
+RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${IMAGES_PKGS}.Registry=${REGISTRY} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-linux-amd64
 RUN chmod +x /talosctl-linux-amd64
 
 FROM base AS talosctl-linux-arm64-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG ARTIFACTS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 ARG MGMT_HELPERS_PKG="github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
 WORKDIR /src/cmd/talosctl
-RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=arm64 go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-linux-arm64
+RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=arm64 go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${IMAGES_PKGS}.Registry=${REGISTRY} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-linux-arm64
 RUN chmod +x /talosctl-linux-arm64
 
 FROM base AS talosctl-linux-armv7-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG ARTIFACTS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 ARG MGMT_HELPERS_PKG="github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
 WORKDIR /src/cmd/talosctl
-RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=arm GOARM=7  go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-linux-armv7
+RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=arm GOARM=7  go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${IMAGES_PKGS}.Registry=${REGISTRY} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-linux-armv7
 RUN chmod +x /talosctl-linux-armv7
 
 FROM scratch AS talosctl-linux
@@ -259,11 +314,15 @@ COPY --from=talosctl-linux-armv7-build /talosctl-linux-armv7 /talosctl-linux-arm
 FROM base AS talosctl-darwin-build
 ARG SHA
 ARG TAG
+ARG PKGS
 ARG ARTIFACTS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 ARG MGMT_HELPERS_PKG="github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
 WORKDIR /src/cmd/talosctl
-RUN --mount=type=cache,target=/.cache/go-build GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-darwin-amd64
+RUN --mount=type=cache,target=/.cache/go-build GOOS=darwin GOARCH=amd64 go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${IMAGES_PKGS}.Registry=${REGISTRY} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" -o /talosctl-darwin-amd64
 RUN chmod +x /talosctl-darwin-amd64
 
 FROM scratch AS talosctl-darwin
@@ -272,36 +331,35 @@ COPY --from=talosctl-darwin-build /talosctl-darwin-amd64 /talosctl-darwin-amd64
 # The kernel target is the linux kernel.
 
 FROM scratch AS kernel
-COPY --from=docker.io/autonomy/kernel:v0.2.0-23-g5cb74d6 /boot/vmlinuz /vmlinuz
-COPY --from=docker.io/autonomy/kernel:v0.2.0-23-g5cb74d6 /boot/vmlinux /vmlinux
+ARG TARGETARCH
+COPY --from=pkg-kernel /boot/vmlinuz /vmlinuz-${TARGETARCH}
 
 # The rootfs target provides the Talos rootfs.
 
 FROM build AS rootfs-base
-COPY --from=docker.io/autonomy/fhs:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/ca-certificates:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/containerd:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/dosfstools:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/eudev:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/iptables:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/libressl:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/libseccomp:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/linux-firmware:v0.2.0-23-g5cb74d6 /lib/firmware/bnx2 /rootfs/lib/firmware/bnx2
-COPY --from=docker.io/autonomy/linux-firmware:v0.2.0-23-g5cb74d6 /lib/firmware/bnx2x /rootfs/lib/firmware/bnx2x
-COPY --from=docker.io/autonomy/lvm2:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/libaio:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/musl:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/open-iscsi:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/open-isns:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/runc:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/socat:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/syslinux:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/xfsprogs:v0.2.0-23-g5cb74d6 / /rootfs
-COPY --from=docker.io/autonomy/util-linux:v0.2.0-23-g5cb74d6 /lib/libblkid.* /rootfs/lib/
-COPY --from=docker.io/autonomy/util-linux:v0.2.0-23-g5cb74d6 /lib/libuuid.* /rootfs/lib/
-COPY --from=docker.io/autonomy/util-linux:v0.2.0-23-g5cb74d6 /lib/libmount.* /rootfs/lib/
-COPY --from=docker.io/autonomy/kmod:v0.2.0-23-g5cb74d6 /usr/lib/libkmod.* /rootfs/lib/
-COPY --from=docker.io/autonomy/kernel:v0.2.0-23-g5cb74d6 /lib/modules /rootfs/lib/modules
+COPY --from=pkg-fhs / /rootfs
+COPY --from=pkg-ca-certificates / /rootfs
+COPY --from=pkg-containerd / /rootfs
+COPY --from=pkg-dosfstools / /rootfs
+COPY --from=pkg-eudev / /rootfs
+COPY --from=pkg-iptables / /rootfs
+COPY --from=pkg-libressl / /rootfs
+COPY --from=pkg-libseccomp / /rootfs
+COPY --from=pkg-linux-firmware /lib/firmware/bnx2 /rootfs/lib/firmware/bnx2
+COPY --from=pkg-linux-firmware /lib/firmware/bnx2x /rootfs/lib/firmware/bnx2x
+COPY --from=pkg-lvm2 / /rootfs
+COPY --from=pkg-libaio / /rootfs
+COPY --from=pkg-musl / /rootfs
+COPY --from=pkg-open-iscsi / /rootfs
+COPY --from=pkg-open-isns / /rootfs
+COPY --from=pkg-runc / /rootfs
+COPY --from=pkg-socat / /rootfs
+COPY --from=pkg-xfsprogs / /rootfs
+COPY --from=pkg-util-linux /lib/libblkid.* /rootfs/lib/
+COPY --from=pkg-util-linux /lib/libuuid.* /rootfs/lib/
+COPY --from=pkg-util-linux /lib/libmount.* /rootfs/lib/
+COPY --from=pkg-kmod /usr/lib/libkmod.* /rootfs/lib/
+COPY --from=pkg-kernel /lib/modules /rootfs/lib/modules
 COPY --from=machined /machined /rootfs/sbin/init
 COPY --from=apid-image /apid.tar /rootfs/usr/images/
 COPY --from=bootkube-image /bootkube.tar /rootfs/usr/images/
@@ -325,7 +383,6 @@ RUN ln -s /etc/ssl /rootfs/usr/local/share/ca-certificates
 RUN ln -s /etc/ssl /rootfs/etc/ca-certificates
 
 FROM rootfs-base AS rootfs-squashfs
-COPY --from=rootfs / /rootfs
 RUN mksquashfs /rootfs /rootfs.sqsh -all-root -noappend -comp xz -Xdict-size 100% -no-progress
 
 FROM scratch AS squashfs
@@ -343,7 +400,8 @@ COPY --from=init /init .
 RUN set -o pipefail && find . 2>/dev/null | cpio -H newc -o | xz -v -C crc32 -0 -e -T 0 -z >/initramfs.xz
 
 FROM scratch AS initramfs
-COPY --from=initramfs-archive /initramfs.xz /initramfs.xz
+ARG TARGETARCH
+COPY --from=initramfs-archive /initramfs.xz /initramfs-${TARGETARCH}.xz
 
 # The talos target generates a docker image that can be used to run Talos
 # in containers.
@@ -358,23 +416,28 @@ ENTRYPOINT ["/sbin/init"]
 FROM base AS installer-build
 ARG SHA
 ARG TAG
+ARG PKGS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 WORKDIR /src/cmd/installer
-RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Talos -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" -o /installer
+RUN --mount=type=cache,target=/.cache/go-build go build -ldflags "-s -w -X ${VERSION_PKG}.Name=Talos -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${IMAGES_PKGS}.Registry=${REGISTRY}" -o /installer
 RUN chmod +x /installer
 
-FROM alpine:3.8 AS installer
+FROM alpine:3.11 AS installer
 RUN apk add --no-cache --update \
     bash \
     ca-certificates \
     cdrkit \
+    efibootmgr \
     qemu-img \
-    syslinux \
     util-linux \
     xfsprogs
-COPY --from=kernel /vmlinuz /usr/install/vmlinuz
-COPY --from=rootfs /usr/lib/syslinux/ /usr/lib/syslinux
-COPY --from=initramfs /initramfs.xz /usr/install/initramfs.xz
+COPY --from=pkg-grub / /
+ARG TARGETARCH
+COPY --from=kernel /vmlinuz-${TARGETARCH} /usr/install/vmlinuz
+COPY --from=initramfs /initramfs-${TARGETARCH}.xz /usr/install/initramfs.xz
 COPY --from=installer-build /installer /bin/installer
 RUN ln -s /bin/installer /bin/talosctl
 ARG TAG
@@ -426,9 +489,13 @@ RUN --security=insecure --mount=type=cache,id=testspace,target=/tmp --mount=type
 FROM base AS integration-test-linux-build
 ARG SHA
 ARG TAG
+ARG PKGS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=amd64 go test -c \
-    -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" \
+    -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Registry=${REGISTRY}" \
     -tags integration,integration_api,integration_cli,integration_k8s \
     ./internal/integration
 
@@ -438,9 +505,13 @@ COPY --from=integration-test-linux-build /src/integration.test /integration-test
 FROM base AS integration-test-darwin-build
 ARG SHA
 ARG TAG
+ARG PKGS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 RUN --mount=type=cache,target=/.cache/go-build GOOS=darwin GOARCH=amd64 go test -c \
-    -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG}" \
+    -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Registry=${REGISTRY}" \
     -tags integration,integration_api,integration_cli,integration_k8s \
     ./internal/integration
 
@@ -452,11 +523,15 @@ COPY --from=integration-test-darwin-build /src/integration.test /integration-tes
 FROM base AS integration-test-provision-linux-build
 ARG SHA
 ARG TAG
+ARG PKGS
+ARG USERNAME
+ARG REGISTRY
 ARG VERSION_PKG="github.com/talos-systems/talos/pkg/version"
+ARG IMAGES_PKGS="github.com/talos-systems/talos/pkg/images"
 ARG MGMT_HELPERS_PKG="github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
 ARG ARTIFACTS
 RUN --mount=type=cache,target=/.cache/go-build GOOS=linux GOARCH=amd64 go test -c \
-    -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" \
+    -ldflags "-s -w -X ${VERSION_PKG}.Name=Client -X ${VERSION_PKG}.SHA=${SHA} -X ${VERSION_PKG}.Tag=${TAG} -X ${VERSION_PKG}.PkgsVersion=${PKGS} -X ${IMAGES_PKGS}.Username=${USERNAME} -X ${IMAGES_PKGS}.Registry=${REGISTRY} -X ${MGMT_HELPERS_PKG}.ArtifactsPath=${ARTIFACTS}" \
     -tags integration,integration_provision \
     ./internal/integration
 
@@ -468,7 +543,11 @@ COPY --from=integration-test-provision-linux-build /src/integration.test /integr
 FROM base AS lint-go
 COPY .golangci.yml .
 ENV GOGC=50
-RUN --mount=type=cache,target=/.cache/go-build golangci-lint run --config .golangci.yml
+RUN --mount=type=cache,target=/.cache/go-build --mount=type=cache,target=/.cache/golangci-lint golangci-lint run --config .golangci.yml
+WORKDIR /src/pkg/machinery
+RUN --mount=type=cache,target=/.cache/go-build --mount=type=cache,target=/.cache/golangci-lint golangci-lint run --config ../../.golangci.yml
+WORKDIR /src
+RUN --mount=type=cache,target=/.cache/go-build importvet github.com/talos-systems/talos/...
 RUN find . -name '*.pb.go' | xargs rm
 RUN FILES="$(gofumports -l -local github.com/talos-systems/talos .)" && test -z "${FILES}" || (echo -e "Source code is not formatted with 'gofumports -w -local github.com/talos-systems/talos .':\n${FILES}"; exit 1)
 
@@ -495,11 +574,13 @@ RUN find . -name '*.md' -not -path '*/node_modules/*' -not -path '*/docs/talosct
 # The docs target generates documentation.
 
 FROM base AS docs-build
-RUN go generate ./pkg/config/types/v1alpha1
+WORKDIR /src/pkg/machinery/config
+RUN go generate ./types/v1alpha1
+WORKDIR /src
 COPY --from=talosctl-linux /talosctl-linux-amd64 /bin/talosctl
 RUN mkdir -p /docs/talosctl \
     && env HOME=/home/user TAG=latest /bin/talosctl docs /docs/talosctl
 
 FROM scratch AS docs
-COPY --from=docs-build /tmp/v1alpha1.md /docs/website/content/v0.6/en/configuration/v1alpha1.md
+COPY --from=docs-build /tmp/v1alpha1.md /docs/website/content/v0.7/en/configuration/v1alpha1.md
 COPY --from=docs-build /docs/talosctl/* /docs/talosctl/

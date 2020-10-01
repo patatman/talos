@@ -15,7 +15,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/talos-systems/talos/internal/integration/base"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
 )
 
 // KubeconfigSuite verifies dmesg command.
@@ -63,6 +63,19 @@ func (suite *KubeconfigSuite) TestCwd() {
 		base.StdoutEmpty())
 
 	suite.Require().FileExists(filepath.Join(tempDir, "kubeconfig"))
+}
+
+// TestCustomName generates kubeconfig with custom name.
+func (suite *KubeconfigSuite) TestCustomName() {
+	tempDir, err := ioutil.TempDir("", "talos")
+	suite.Require().NoError(err)
+
+	defer os.RemoveAll(tempDir) //nolint: errcheck
+
+	suite.RunCLI([]string{"kubeconfig", "--nodes", suite.RandomDiscoveredNode(machine.TypeControlPlane), filepath.Join(tempDir, "k8sconfig")},
+		base.StdoutEmpty())
+
+	suite.Require().FileExists(filepath.Join(tempDir, "k8sconfig"))
 }
 
 // TestMultiNodeFail verifies that command fails with multiple nodes.

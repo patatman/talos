@@ -18,11 +18,12 @@ talosctl gen config <cluster name> <cluster endpoint> [flags]
 
 ```
       --additional-sans strings     additional Subject-Alt-Names for the APIServer certificate
+      --arch string                 the architecture of the cluster (default "amd64")
       --dns-domain string           the dns domain to use for cluster (default "cluster.local")
   -h, --help                        help for config
       --install-disk string         the disk to install to (default "/dev/sda")
-      --install-image string        the image used to perform an installation (default "docker.io/autonomy/installer:latest")
-      --kubernetes-version string   desired kubernetes version to run (default "1.19.0-rc.3")
+      --install-image string        the image used to perform an installation (default "ghcr.io/talos-systems/installer:latest")
+      --kubernetes-version string   desired kubernetes version to run (default "1.19.1")
   -o, --output-dir string           destination to output generated files
   -p, --persist                     the desired persist value for configs (default true)
       --registry-mirror strings     list of registry mirrors to use in format: <registry host>=<mirror URL>

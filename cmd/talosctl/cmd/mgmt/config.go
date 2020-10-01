@@ -10,21 +10,24 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	"github.com/talos-systems/talos/cmd/talosctl/pkg/mgmt/helpers"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/bundle"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/generate"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
+	"github.com/talos-systems/talos/pkg/images"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/bundle"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/generate"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 var (
 	additionalSANs    []string
 	configVersion     string
+	architecture      string
 	dnsDomain         string
 	kubernetesVersion string
 	installDisk       string
@@ -101,6 +104,7 @@ func genV1Alpha1Config(args []string) error {
 					generate.WithAdditionalSubjectAltNames(additionalSANs),
 					generate.WithDNSDomain(dnsDomain),
 					generate.WithPersist(persistConfig),
+					generate.WithArchitecture(architecture),
 				),
 			},
 		),
@@ -115,7 +119,7 @@ func genV1Alpha1Config(args []string) error {
 
 		var configString string
 
-		switch t {
+		switch t { //nolint: exhaustive
 		case machine.TypeInit:
 			configString, err = configBundle.Init().String()
 			if err != nil {
@@ -162,9 +166,10 @@ func genV1Alpha1Config(args []string) error {
 func init() {
 	genCmd.AddCommand(genConfigCmd)
 	genConfigCmd.Flags().StringVar(&installDisk, "install-disk", "/dev/sda", "the disk to install to")
-	genConfigCmd.Flags().StringVar(&installImage, "install-image", helpers.DefaultImage(constants.DefaultInstallerImageRepository), "the image used to perform an installation")
+	genConfigCmd.Flags().StringVar(&installImage, "install-image", helpers.DefaultImage(images.DefaultInstallerImageRepository), "the image used to perform an installation")
 	genConfigCmd.Flags().StringSliceVar(&additionalSANs, "additional-sans", []string{}, "additional Subject-Alt-Names for the APIServer certificate")
 	genConfigCmd.Flags().StringVar(&dnsDomain, "dns-domain", "cluster.local", "the dns domain to use for cluster")
+	genConfigCmd.Flags().StringVar(&architecture, "arch", runtime.GOARCH, "the architecture of the cluster")
 	genConfigCmd.Flags().StringVar(&configVersion, "version", "v1alpha1", "the desired machine config version to generate")
 	genConfigCmd.Flags().StringVar(&kubernetesVersion, "kubernetes-version", constants.DefaultKubernetesVersion, "desired kubernetes version to run")
 	genConfigCmd.Flags().StringVarP(&outputDir, "output-dir", "o", "", "destination to output generated files")

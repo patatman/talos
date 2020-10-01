@@ -13,6 +13,7 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -22,8 +23,8 @@ import (
 
 	"github.com/talos-systems/talos/internal/pkg/containers/image"
 	"github.com/talos-systems/talos/internal/pkg/kmsg"
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/constants"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // RunInstallerContainer performs an installation via the installer container.
@@ -47,18 +48,17 @@ func RunInstallerContainer(disk, platform, ref string, reg config.Registries, op
 
 	var img containerd.Image
 
-	if options.Pull {
-		log.Printf("pulling %q", ref)
+	img, err = client.GetImage(ctx, ref)
+	if err != nil {
+		if errdefs.IsNotFound(err) && options.Pull {
+			log.Printf("pulling %q", ref)
 
-		img, err = image.Pull(ctx, reg, client, ref)
-		if err != nil {
-			return err
+			img, err = image.Pull(ctx, reg, client, ref)
 		}
-	} else {
-		img, err = client.GetImage(ctx, ref)
-		if err != nil {
-			return err
-		}
+	}
+
+	if err != nil {
+		return err
 	}
 
 	mounts := []specs.Mount{
@@ -101,6 +101,7 @@ func RunInstallerContainer(disk, platform, ref string, reg config.Registries, op
 		oci.WithHostResolvconf,
 		oci.WithParentCgroupDevices,
 		oci.WithPrivileged,
+		oci.WithAllDevicesAllowed,
 	}
 
 	containerOpts := []containerd.NewContainerOpts{

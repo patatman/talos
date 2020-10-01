@@ -13,9 +13,10 @@ import (
 	"github.com/hashicorp/go-multierror"
 	"google.golang.org/grpc"
 
-	securityapi "github.com/talos-systems/talos/api/security"
-	"github.com/talos-systems/talos/pkg/crypto/x509"
+	"github.com/talos-systems/crypto/x509"
+
 	"github.com/talos-systems/talos/pkg/grpc/middleware/auth/basic"
+	securityapi "github.com/talos-systems/talos/pkg/machinery/api/security"
 )
 
 // RemoteGenerator represents the OS identity generator.

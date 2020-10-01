@@ -28,18 +28,17 @@ import (
 	"golang.org/x/sys/unix"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
-	"github.com/kubernetes-sigs/bootkube/pkg/recovery"
+	"github.com/talos-systems/go-retry/retry"
 
-	machineapi "github.com/talos-systems/talos/api/machine"
 	installer "github.com/talos-systems/talos/cmd/installer/pkg/install"
 	"github.com/talos-systems/talos/internal/app/machined/internal/install"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime"
-	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader/syslinux"
+	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader"
+	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/bootloader/grub"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/events"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/services"
 	"github.com/talos-systems/talos/internal/app/networkd/pkg/networkd"
-	"github.com/talos-systems/talos/internal/pkg/conditions"
 	"github.com/talos-systems/talos/internal/pkg/containers/cri/containerd"
 	"github.com/talos-systems/talos/internal/pkg/cri"
 	"github.com/talos-systems/talos/internal/pkg/etcd"
@@ -51,11 +50,12 @@ import (
 	"github.com/talos-systems/talos/pkg/blockdevice/table"
 	"github.com/talos-systems/talos/pkg/blockdevice/util"
 	"github.com/talos-systems/talos/pkg/cmd"
-	"github.com/talos-systems/talos/pkg/config/configloader"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
+	"github.com/talos-systems/talos/pkg/conditions"
 	"github.com/talos-systems/talos/pkg/kubernetes"
-	"github.com/talos-systems/talos/pkg/retry"
+	machineapi "github.com/talos-systems/talos/pkg/machinery/api/machine"
+	"github.com/talos-systems/talos/pkg/machinery/config/configloader"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 	"github.com/talos-systems/talos/pkg/sysctl"
 	"github.com/talos-systems/talos/pkg/version"
 )
@@ -98,7 +98,7 @@ func EnforceKSPPRequirements(seq runtime.Sequence, data interface{}) (runtime.Ta
 // SetupSystemDirectory represents the SetupSystemDirectory task.
 func SetupSystemDirectory(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
 	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) (err error) {
-		for _, p := range []string{constants.SystemEtcPath, constants.SystemRunPath, constants.SystemVarPath} {
+		for _, p := range []string{constants.SystemEtcPath, constants.SystemRunPath, constants.SystemVarPath, constants.StateMountPoint} {
 			if err = os.MkdirAll(p, 0o700); err != nil {
 				return err
 			}
@@ -596,17 +596,6 @@ func StartUdevd(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFu
 			return err
 		}
 
-		if _, err = cmd.Run("/sbin/udevadm", "trigger"); err != nil {
-			return err
-		}
-
-		// This ensures that `udevd` finishes processing kernel events, triggered by
-		// `udevd trigger`, to prevent a race condition when a user specifies a path
-		// under `/dev/disk/*` in any disk definitions.
-		if _, err = cmd.Run("/sbin/udevadm", "settle"); err != nil {
-			return err
-		}
-
 		return nil
 	}, "startUdevd"
 }
@@ -624,7 +613,7 @@ func StartAllServices(seq runtime.Sequence, data interface{}) (runtime.TaskExecu
 			&services.Kubelet{},
 		)
 
-		if r.State().Platform().Mode() != runtime.ModeContainer {
+		if r.State().Platform().Mode() != runtime.ModeContainer && r.Config().Machine().Time().Enabled() {
 			svcs.Load(
 				&services.Timed{},
 			)
@@ -643,6 +632,8 @@ func StartAllServices(seq runtime.Sequence, data interface{}) (runtime.TaskExecu
 				&services.Etcd{},
 			)
 		case machine.TypeJoin:
+		case machine.TypeUnknown:
+			return fmt.Errorf("unexpected machine type: %s", r.Config().Machine().Type())
 		}
 
 		system.Services(r).StartAll()
@@ -694,13 +685,17 @@ func VerifyInstallation(seq runtime.Sequence, data interface{}) (runtime.TaskExe
 			next    string
 		)
 
-		current, next, err = syslinux.Labels()
+		grub := &grub.Grub{
+			BootDisk: r.Config().Machine().Install().Disk(),
+		}
+
+		current, next, err = grub.Labels()
 		if err != nil {
 			return err
 		}
 
 		if current == "" && next == "" {
-			return fmt.Errorf("syslinux.cfg is not configured")
+			return fmt.Errorf("bootloader is not configured")
 		}
 
 		return err
@@ -878,10 +873,7 @@ func WriteUserFiles(seq runtime.Sequence, data interface{}) (runtime.TaskExecuti
 
 			switch f.Op() {
 			case "create":
-				if err = doesNotExists(f.Path()); err != nil {
-					result = multierror.Append(result, fmt.Errorf("file must not exist: %q", f.Path()))
-					continue
-				}
+				// Allow create at all times.
 			case "overwrite":
 				if err = existsAndIsFile(f.Path()); err != nil {
 					result = multierror.Append(result, err)
@@ -907,16 +899,30 @@ func WriteUserFiles(seq runtime.Sequence, data interface{}) (runtime.TaskExecuti
 				continue
 			}
 
+			if filepath.Dir(f.Path()) == constants.ManifestsDirectory {
+				if err = ioutil.WriteFile(f.Path(), []byte(content), f.Permissions()); err != nil {
+					result = multierror.Append(result, err)
+					continue
+				}
+
+				if err = os.Chmod(f.Path(), f.Permissions()); err != nil {
+					result = multierror.Append(result, err)
+					continue
+				}
+
+				continue
+			}
+
 			// Determine if supplied path is in /var or not.
 			// If not, we'll write it to /var anyways and bind mount below
 			p := f.Path()
 			inVar := true
-			explodedPath := strings.Split(
+			parts := strings.Split(
 				strings.TrimLeft(f.Path(), "/"),
 				string(os.PathSeparator),
 			)
 
-			if explodedPath[0] != "var" {
+			if parts[0] != "var" {
 				p = filepath.Join("/var", f.Path())
 				inVar = false
 			}
@@ -927,7 +933,7 @@ func WriteUserFiles(seq runtime.Sequence, data interface{}) (runtime.TaskExecuti
 				return fmt.Errorf("create operation not allowed outside of /var: %q", f.Path())
 			}
 
-			if err = os.MkdirAll(filepath.Dir(p), os.ModeDir); err != nil {
+			if err = os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 				result = multierror.Append(result, err)
 				continue
 			}
@@ -937,7 +943,11 @@ func WriteUserFiles(seq runtime.Sequence, data interface{}) (runtime.TaskExecuti
 				continue
 			}
 
-			// File path was not /var/... so we assume a bind mount is wanted
+			if err = os.Chmod(p, f.Permissions()); err != nil {
+				result = multierror.Append(result, err)
+				continue
+			}
+
 			if !inVar {
 				if err = unix.Mount(p, f.Path(), "", unix.MS_BIND|unix.MS_RDONLY, ""); err != nil {
 					result = multierror.Append(result, fmt.Errorf("failed to create bind mount for %s: %w", p, err))
@@ -949,6 +959,7 @@ func WriteUserFiles(seq runtime.Sequence, data interface{}) (runtime.TaskExecuti
 	}, "writeUserFiles"
 }
 
+// nolint: deadcode,unused
 func doesNotExists(p string) (err error) {
 	_, err = os.Stat(p)
 	if err != nil {
@@ -1136,7 +1147,7 @@ func UncordonNode(seq runtime.Sequence, data interface{}) (runtime.TaskExecution
 			return err
 		}
 
-		if err = kubeHelper.Uncordon(hostname); err != nil {
+		if err = kubeHelper.Uncordon(hostname, false); err != nil {
 			return err
 		}
 
@@ -1384,23 +1395,17 @@ func LabelNodeAsMaster(seq runtime.Sequence, data interface{}) (runtime.TaskExec
 // UpdateBootloader represents the UpdateBootloader task.
 func UpdateBootloader(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
 	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) (err error) {
-		f, err := os.OpenFile(syslinux.SyslinuxLdlinux, os.O_RDWR, 0o700)
+		meta, err := bootloader.NewMeta()
 		if err != nil {
 			return err
 		}
-
 		// nolint: errcheck
-		defer f.Close()
+		defer meta.Close()
 
-		adv, err := syslinux.NewADV(f)
-		if err != nil {
-			return err
-		}
-
-		if ok := adv.DeleteTag(syslinux.AdvUpgrade); ok {
+		if ok := meta.DeleteTag(bootloader.AdvUpgrade); ok {
 			logger.Println("removing fallback")
 
-			if _, err = f.Write(adv); err != nil {
+			if _, err = meta.Write(); err != nil {
 				return err
 			}
 		}
@@ -1472,6 +1477,34 @@ func UnmountBootPartition(seq runtime.Sequence, data interface{}) (runtime.TaskE
 	}, "unmountBootPartition"
 }
 
+// MountEFIPartition mounts the EFI partition.
+func MountEFIPartition(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
+	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) (err error) {
+		return mountSystemPartition(constants.EFIPartitionLabel)
+	}, "mountEFIPartition"
+}
+
+// UnmountEFIPartition unmounts the EFI partition.
+func UnmountEFIPartition(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
+	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+		return unmountSystemPartition(constants.EFIPartitionLabel)
+	}, "unmountEFIPartition"
+}
+
+// MountStatePartition mounts the system partition.
+func MountStatePartition(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
+	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) (err error) {
+		return mountSystemPartition(constants.StatePartitionLabel, mount.WithSkipIfMounted(true))
+	}, "mountStatePartition"
+}
+
+// UnmountStatePartition unmounts the system partition.
+func UnmountStatePartition(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
+	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
+		return unmountSystemPartition(constants.StatePartitionLabel)
+	}, "unmountStatePartition"
+}
+
 // MountEphermeralPartition mounts the ephemeral partition.
 func MountEphermeralPartition(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
 	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) error {
@@ -1486,10 +1519,10 @@ func UnmountEphemeralPartition(seq runtime.Sequence, data interface{}) (runtime.
 	}, "unmountEphemeralPartition"
 }
 
-func mountSystemPartition(label string) (err error) {
+func mountSystemPartition(label string, opts ...mount.Option) (err error) {
 	mountpoints := mount.NewMountPoints()
 
-	mountpoint, err := mount.SystemMountPointForLabel(label)
+	mountpoint, err := mount.SystemMountPointForLabel(label, opts...)
 	if err != nil {
 		return err
 	}
@@ -1531,10 +1564,6 @@ func unmountSystemPartition(label string) (err error) {
 // Install mounts or installs the system partitions.
 func Install(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc, string) {
 	return func(ctx context.Context, logger *log.Logger, r runtime.Runtime) (err error) {
-		if r.Config().Machine().Install().Image() == "" {
-			return errors.New("an install image is required")
-		}
-
 		err = install.RunInstallerContainer(
 			r.Config().Machine().Install().Disk(),
 			r.State().Platform().Name(),
@@ -1568,55 +1597,23 @@ func Recover(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc,
 			return runtime.ErrInvalidSequenceData
 		}
 
-		kubeconfigPath := "/etc/kubernetes/recovery.yaml"
-
 		var b bytes.Buffer
 
 		if err = kubeconfig.GenerateAdmin(r.Config().Cluster(), &b); err != nil {
 			return err
 		}
 
-		if err = ioutil.WriteFile(kubeconfigPath, b.Bytes(), 0o600); err != nil {
+		if err = ioutil.WriteFile(constants.RecoveryKubeconfig, b.Bytes(), 0o600); err != nil {
 			return fmt.Errorf("failed to create recovery kubeconfig: %w", err)
 		}
 
 		// nolint: errcheck
-		defer os.Remove(kubeconfigPath)
+		defer os.Remove(constants.RecoveryKubeconfig)
 
-		var backend recovery.Backend
-
-		switch in.Source {
-		case machineapi.RecoverRequest_ETCD:
-			var client *clientv3.Client
-
-			client, err = etcd.NewClient([]string{"127.0.0.1:2379"})
-			if err != nil {
-				return err
-			}
-
-			backend = recovery.NewEtcdBackend(client, "/registry")
-
-		case machineapi.RecoverRequest_APISERVER:
-			backend, err = recovery.NewAPIServerBackend(kubeconfigPath)
-			if err != nil {
-				return err
-			}
+		svc := &services.Bootkube{
+			Recover: true,
+			Source:  in.Source,
 		}
-
-		as, err := recovery.Recover(context.Background(), backend, kubeconfigPath)
-		if err != nil {
-			return err
-		}
-
-		if err = os.MkdirAll(constants.AssetsDirectory, 0o600); err != nil {
-			return err
-		}
-
-		if err = as.WriteFiles(constants.AssetsDirectory); err != nil {
-			return fmt.Errorf("failed to write recovered assets: %w", err)
-		}
-
-		svc := &services.Bootkube{Recover: true}
 
 		// unload bootkube (if any instance ran before)
 		if err = system.Services(r).Unload(ctx, svc.ID(r)); err != nil {
@@ -1629,7 +1626,10 @@ func Recover(seq runtime.Sequence, data interface{}) (runtime.TaskExecutionFunc,
 			return fmt.Errorf("failed to start bootkube: %w", err)
 		}
 
-		return nil
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+
+		return system.WaitForService(system.StateEventFinished, svc.ID(r)).Wait(ctx)
 	}, "recover"
 }
 

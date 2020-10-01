@@ -24,17 +24,15 @@ import (
 	"github.com/kubernetes-sigs/bootkube/pkg/tlsutil"
 	"github.com/talos-systems/bootkube-plugin/pkg/asset"
 
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/constants"
-	tnet "github.com/talos-systems/talos/pkg/net"
+	tnet "github.com/talos-systems/net"
+
+	"github.com/talos-systems/talos/internal/app/bootkube/images"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // nolint: gocyclo
 func generateAssets(config config.Provider) (err error) {
-	if err = os.MkdirAll(constants.ManifestsDirectory, 0o644); err != nil {
-		return err
-	}
-
 	// Ensure assets directory does not exist / is left over from a failed install
 	if err = os.RemoveAll(constants.AssetsDirectory); err != nil {
 		// Ignore if the directory does not exist
@@ -127,18 +125,7 @@ func generateAssets(config config.Provider) (err error) {
 		return fmt.Errorf("failed to calculate DNS service IP: %w", err)
 	}
 
-	images := asset.DefaultImages
-
-	// Override all kube-related images with default val or specified image locations
-	images.Kubelet = config.Machine().Kubelet().Image()
-	images.KubeAPIServer = config.Cluster().APIServer().Image()
-	images.KubeControllerManager = config.Cluster().ControllerManager().Image()
-	images.KubeProxy = config.Cluster().Proxy().Image()
-	images.KubeScheduler = config.Cluster().Scheduler().Image()
-
-	// Allow for overriding by users via config data
-	images.CoreDNS = config.Cluster().CoreDNS().Image()
-	images.PodCheckpointer = config.Cluster().PodCheckpointer().Image()
+	images := images.List(config)
 
 	conf := asset.Config{
 		ClusterName:                config.Cluster().Name(),

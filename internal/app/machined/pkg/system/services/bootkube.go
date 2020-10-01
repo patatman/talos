@@ -5,6 +5,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,26 +13,29 @@ import (
 	"strconv"
 	"time"
 
-	containerdapi "github.com/containerd/containerd"
 	"github.com/containerd/containerd/oci"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"go.etcd.io/etcd/clientv3"
 	"go.etcd.io/etcd/etcdserver/api/v3rpc/rpctypes"
 
+	"github.com/talos-systems/go-retry/retry"
+
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/events"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner"
 	"github.com/talos-systems/talos/internal/app/machined/pkg/system/runner/containerd"
-	"github.com/talos-systems/talos/internal/pkg/conditions"
+	"github.com/talos-systems/talos/internal/pkg/containers/image"
 	"github.com/talos-systems/talos/internal/pkg/etcd"
-	"github.com/talos-systems/talos/pkg/config/types/v1alpha1/machine"
-	"github.com/talos-systems/talos/pkg/constants"
-	"github.com/talos-systems/talos/pkg/retry"
+	"github.com/talos-systems/talos/pkg/conditions"
+	machineapi "github.com/talos-systems/talos/pkg/machinery/api/machine"
+	"github.com/talos-systems/talos/pkg/machinery/config/types/v1alpha1/machine"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // Bootkube implements the Service interface. It serves as the concrete type with
 // the required methods.
 type Bootkube struct {
+	Source  machineapi.RecoverRequest_Source
 	Recover bool
 
 	provisioned bool
@@ -90,14 +94,7 @@ func (b *Bootkube) PreFunc(ctx context.Context, r runtime.Runtime) (err error) {
 		}
 	}
 
-	importer := containerd.NewImporter(constants.SystemContainerdNamespace, containerd.WithContainerdAddress(constants.SystemContainerdAddress))
-
-	return importer.Import(&containerd.ImportRequest{
-		Path: "/usr/images/bootkube.tar",
-		Options: []containerdapi.ImportOpt{
-			containerdapi.WithIndexName("talos/bootkube"),
-		},
-	})
+	return image.Import(ctx, "/usr/images/bootkube.tar", "talos/bootkube")
 }
 
 // PostFunc implements the Service interface.
@@ -161,8 +158,9 @@ func (b *Bootkube) Runner(r runtime.Runtime) (runner.Runner, error) {
 		ID: b.ID(r),
 		ProcessArgs: []string{
 			"/bootkube",
-			"--config=" + constants.ConfigPath,
 			"--strict=" + strconv.FormatBool(!b.Recover),
+			"--recover=" + strconv.FormatBool(b.Recover),
+			"--recover-source=" + b.Source.String(),
 		},
 	}
 
@@ -174,13 +172,20 @@ func (b *Bootkube) Runner(r runtime.Runtime) (runner.Runner, error) {
 	// Set the required kubelet mounts.
 	mounts := []specs.Mount{
 		{Type: "bind", Destination: "/etc/ssl", Source: "/etc/ssl", Options: []string{"bind", "ro"}},
-		{Type: "bind", Destination: constants.ConfigPath, Source: constants.ConfigPath, Options: []string{"rbind", "ro"}},
 		{Type: "bind", Destination: "/etc/kubernetes", Source: "/etc/kubernetes", Options: []string{"bind", "rshared", "rw"}},
 	}
+
+	bb, err := r.Config().Bytes()
+	if err != nil {
+		return nil, err
+	}
+
+	stdin := bytes.NewReader(bb)
 
 	return containerd.NewRunner(
 		r.Config().Debug(),
 		&args,
+		runner.WithStdin(stdin),
 		runner.WithLoggingManager(r.Logging()),
 		runner.WithContainerdAddress(constants.SystemContainerdAddress),
 		runner.WithContainerImage(image),

@@ -24,8 +24,8 @@ import (
 	"github.com/talos-systems/talos/internal/app/machined/pkg/runtime/v1alpha1/platform"
 	"github.com/talos-systems/talos/internal/app/networkd/pkg/address"
 	"github.com/talos-systems/talos/internal/app/networkd/pkg/nic"
-	"github.com/talos-systems/talos/pkg/config"
-	"github.com/talos-systems/talos/pkg/constants"
+	"github.com/talos-systems/talos/pkg/machinery/config"
+	"github.com/talos-systems/talos/pkg/machinery/constants"
 )
 
 // Set up default nameservers.
@@ -156,6 +156,11 @@ func New(config config.Provider) (*Networkd, error) {
 		}
 
 		for _, subif := range netif.SubInterfaces {
+			if _, ok := interfaces[subif.Name]; !ok {
+				result = multierror.Append(result, fmt.Errorf("bond subinterface %s does not exist", subif.Name))
+				continue
+			}
+
 			interfaces[subif.Name].Ignore = true
 		}
 	}
